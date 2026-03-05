@@ -1,0 +1,41 @@
+
+CYBERBLUE FOLDER STRUCTURE — WHERE EACH FILE GOES
+==================================================
+
+Your CyberBlue folder looks like this:
+/home/ubuntu/CyberBlue/
+│
+├── fix-errors.sh              ← NEW FILE  (download and put here)
+├── force-start.sh             ← REPLACE existing file
+├── fix-arkime.sh              ← REPLACE existing file
+├── fix-fleet.sh               ← REPLACE existing file
+├── fix-wazuh-services.sh      ← REPLACE existing file
+├── install_caldera.sh         ← REPLACE existing file
+├── docker-compose.yml         ← READ docker-compose-FIXES.yml to know what to change
+│
+├── misp/
+│   └── configure-threat-feeds.sh   ← REPLACE existing file
+│
+└── fleet/
+    └── configure-fleet-secret.sh   ← REPLACE existing file
+
+
+STEP BY STEP — WHAT TO DO:
+==================================================
+
+STEP 1: Copy fix-errors.sh to CyberBlue folder
+  cp fix-errors.sh ~/CyberBlue/fix-errors.sh
+
+STEP 2: Make it executable and run it
+  cd ~/CyberBlue
+  chmod +x fix-errors.sh
+  bash fix-errors.sh
+
+STEP 3: Replace all the other files
+  chmod +x force-start.sh
+  chmod +x fix-arkime.sh
+  chmod +x fix-fleet.sh
+  chmod +x fix-wazuh-services.sh
+  chmod +x install_caldera.sh
+  cp configure-threat-feeds.sh ~/CyberBlue/misp/configure-threat-feeds.sh
+  cp configure-fleet-secret.sh ~/CyberBlue/fleet/configure-fleet-secret.sh
