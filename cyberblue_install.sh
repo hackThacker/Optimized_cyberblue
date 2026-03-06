@@ -363,19 +363,19 @@ fi
 # ============================================================
 # STEP 12 — JVM heap tuning
 # ============================================================
-step "STEP 12 — JVM heap tuning for 16 GB RAM"
+step "STEP 12 — JVM heap tuning"
 
-upsert_env OPENSEARCH_JAVA_OPTS "-Xms3g -Xmx3g"
-upsert_env ES_JAVA_OPTS         "-Xms3g -Xmx3g"
+upsert_env OPENSEARCH_JAVA_OPTS "-Xms1g -Xmx1g"
+upsert_env ES_JAVA_OPTS         "-Xms1g -Xmx1g"
 
 WAZUH_JVM="wazuh/config/wazuh_indexer/jvm.options"
 if [ -f "$WAZUH_JVM" ]; then
-  sudo sed -i 's/-Xms[0-9]*[gGmM]/-Xms3g/g' "$WAZUH_JVM"
-  sudo sed -i 's/-Xmx[0-9]*[gGmM]/-Xmx3g/g' "$WAZUH_JVM"
-  log "Wazuh indexer JVM heap: 3g"
+  sudo sed -i 's/-Xms[0-9]*[gGmM]/-Xms1g/g' "$WAZUH_JVM"
+  sudo sed -i 's/-Xmx[0-9]*[gGmM]/-Xmx1g/g' "$WAZUH_JVM"
+  log "Wazuh indexer JVM heap: 1g"
 fi
 
-log "JVM heap: 3 GB for OpenSearch/Wazuh indexer"
+log "JVM heap: 1 GB for OpenSearch/Wazuh indexer"
 
 # ============================================================
 # STEP 13 — Docker networking
