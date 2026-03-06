@@ -388,9 +388,29 @@ sudo iptables -t filter -F DOCKER                  2>/dev/null || true
 sudo iptables -t filter -F DOCKER-ISOLATION-STAGE-1 2>/dev/null || true
 sudo iptables -t filter -F DOCKER-ISOLATION-STAGE-2 2>/dev/null || true
 sudo iptables -P FORWARD ACCEPT
-# FIX: Removed second unnecessary Docker restart (Step 2 already restarted it)
-# Just re-apply socket permission in case it was reset
 sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
+
+# ── FIX: group_add "docker" → numeric GID ────────────────────────
+# Containers are minimal images — they have NO group named "docker"
+# docker-compose group_add must use the numeric GID from the HOST
+# Without this fix: "Unable to find group docker: no matching entries"
+DOCKER_GID=$(getent group docker 2>/dev/null | cut -d: -f3 || echo "")
+if [ -n "$DOCKER_GID" ]; then
+  python3 - << PYEOF 2>/dev/null || true
+import re
+gid = "$DOCKER_GID"
+with open("docker-compose.yml", "r") as f:
+    content = f.read()
+original = content
+content = re.sub(r'(group_add:\s*\n\s+- )"docker"', f'\\\\1"{gid}"', content)
+content = re.sub(r'(group_add:\s*\n\s+- )docker\b',  f'\\\\1"{gid}"', content)
+if content != original:
+    with open("docker-compose.yml", "w") as f:
+        f.write(content)
+    print(f"  group_add fixed: docker → GID {gid}")
+PYEOF
+  log "group_add docker GID set to $DOCKER_GID"
+fi
 
 log "Docker networking ready"
 
@@ -402,14 +422,51 @@ step "STEP 14 — Starting containers"
 log "Starting CRITICAL services (OpenSearch/Wazuh indexer first)..."
 docker compose up -d wazuh.indexer 2>&1 | tail -3
 
+# ── FIXED HEALTH CHECK ────────────────────────────────────────────
+# PROBLEM 1: curl localhost:9200 from HOST always fails
+#            Port 9200 is NOT exposed to host — only inside Docker network
+# PROBLEM 2: docker exec wazuh.indexer curl — fails because
+#            wazuh-indexer container has NO curl installed
+# PROBLEM 3: Only one check method — if it fails, loops 180 seconds
+#
+# FIX: Use 3 methods in order — any one passing = indexer is ready
+#   Method 1: docker logs — look for "Cluster health status changed to [GREEN]"
+#             Works immediately when OpenSearch is ready, no curl needed
+#   Method 2: docker inspect healthcheck — if compose has healthcheck defined
+#             reads Docker's own health status (healthy/unhealthy/starting)
+#   Method 3: docker exec with wget — wget is available in wazuh-indexer
+#             connects from INSIDE the container where 9200 is accessible
+
 log "Waiting for OpenSearch/Wazuh indexer to be healthy..."
 WAIT=0
 MAX_WAIT=180
-until curl -sk -u admin:SecretPassword https://localhost:9200/_cluster/health &>/dev/null || \
-      docker exec wazuh.indexer \
-        curl -sk -u admin:SecretPassword https://localhost:9200/_cluster/health &>/dev/null; do
+
+indexer_ready() {
+  # Method 1 — check logs for GREEN cluster health (fastest, no curl needed)
+  docker logs wazuh.indexer 2>/dev/null \
+    | grep -q "Cluster health status changed to \[GREEN\]" && return 0
+
+  # Method 2 — check Docker's own healthcheck status
+  STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
+    wazuh.indexer 2>/dev/null || echo "none")
+  [ "$STATUS" = "healthy" ] && return 0
+
+  # Method 3 — wget from inside container (wget exists in wazuh-indexer)
+  docker exec wazuh.indexer wget -qO- \
+    --no-check-certificate \
+    --user=admin --password=SecretPassword \
+    "https://localhost:9200/_cluster/health" \
+    &>/dev/null && return 0
+
+  return 1
+}
+
+until indexer_ready; do
   sleep 5; WAIT=$((WAIT+5))
-  [ $WAIT -ge $MAX_WAIT ] && { warn "Indexer slow — continuing anyway"; break; }
+  [ $WAIT -ge $MAX_WAIT ] && {
+    warn "Indexer taking long — continuing anyway (will retry in background)"
+    break
+  }
   echo -ne "\r  Waiting for indexer... ${WAIT}s / ${MAX_WAIT}s"
 done
 echo ""
