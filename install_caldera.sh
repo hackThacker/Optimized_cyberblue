@@ -148,7 +148,10 @@ cd "$SCRIPT_DIR"
 
 # FIX: Original always runs docker compose up -d caldera which triggers
 # a full image rebuild even if nothing changed. We check first.
-if docker images --format "{{.Repository}}" | grep -q "cyberblue.*caldera\|caldera"; then
+# FIX: Check specifically for the CyberBlue caldera image (not any image named caldera)
+# Original grep was too broad and would skip build if ANY "caldera" image existed
+CALDERA_IMAGE=$(docker compose config --images 2>/dev/null | grep -i caldera | head -1 || echo "")
+if docker images --format "{{.Repository}}:{{.Tag}}" | grep -qF "${CALDERA_IMAGE:-NOTFOUND}"; then
   log "Caldera Docker image already exists — skipping build (saves 2-3 min)"
   docker compose up -d caldera
 else

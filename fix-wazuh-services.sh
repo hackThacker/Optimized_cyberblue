@@ -77,8 +77,8 @@ else
   sudo chown -R "$(whoami):$(id -gn)" "$CERT_DIR"
 
   # Stop/remove cert generator container only
-  docker stop wazuh-cert-genrator 2>/dev/null || true
-  docker rm   wazuh-cert-genrator 2>/dev/null || true
+  docker stop wazuh-cert-generator 2>/dev/null || true
+  docker rm   wazuh-cert-generator 2>/dev/null || true
 
   log "Generating fresh SSL certificates..."
   docker compose up -d generator
@@ -91,7 +91,7 @@ else
     [ $WAIT -ge $MAX ] && {
       echo ""
       err "Certificate generation failed after ${MAX}s"
-      docker logs wazuh-cert-genrator --tail 20
+      docker logs wazuh-cert-generator --tail 20
       exit 1
     }
   done
@@ -162,7 +162,7 @@ done
 [ $WAIT -lt $MAX ] && { echo ""; log "Wazuh Dashboard ready (${WAIT}s)"; }
 
 # ── Step 5: Clean up cert generator container ─────────────────────
-docker stop wazuh-cert-genrator 2>/dev/null || true
+docker stop wazuh-cert-generator 2>/dev/null || true
 
 # ── Final verification ────────────────────────────────────────────
 step "STEP 5 — Final verification"

@@ -1,107 +1,406 @@
-# ============================================================================
-# docker-compose.yml — CRITICAL FIXES SUMMARY
-# ============================================================================
-# Apply these changes to your docker-compose.yml
-# ============================================================================
+services:
+  portal:
+    build:
+      context: ./portal
+      dockerfile: Dockerfile
+    container_name: cyber-blue-portal
+    ports:
+      - "5500:5500"
+      - "5443:5443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./portal/logs:/app/logs
+      - ./portal/ssl:/app/ssl:ro
+      - ./velociraptor:/velociraptor
+      - ./wazuh/agents:/wazuh/agents
+      - ./fleet/agents:/fleet/agents
+      - ./caldera/agents:/caldera/agents
+      - /opt/yara-rules:/opt/yara-rules
+      - /opt/sigma-rules:/opt/sigma-rules
+      - /var/log:/var/log
+    environment:
+      - PORT=5500
+      - HTTPS_PORT=5443
+      - FLASK_ENV=production
+      - HOST_IP=${HOST_IP}
+      - CYBERBLUE_INSTALL_DIR=${CYBERBLUE_INSTALL_DIR:-/home/ubuntu/CyberBlue}
+      - CYBERBLUE_INSTALL_USER=${CYBERBLUE_INSTALL_USER:-ubuntu}
+      - ENABLE_HTTPS=true
+      - SSL_CERT_PATH=/app/ssl/cert.pem
+      - SSL_KEY_PATH=/app/ssl/key.pem
+      - SECRET_KEY=cyberblue-secure-secret-key-change-in-production
+      - ADMIN_PASSWORD=cyberblue123
+    group_add:
+      - "docker" # FIX BUG 14: portal needs docker group for docker.sock access
+    restart: unless-stopped
+    networks:
+      - cyber-blue
 
-# ──────────────────────────────────────────────────────────────────
-# FIX 1: Wazuh Indexer heap is too LOW (1g crashes on 16GB with many containers)
-# ──────────────────────────────────────────────────────────────────
-# FIND THIS in wazuh.indexer section:
-#   - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
-#
-# REPLACE WITH:
-#   - "OPENSEARCH_JAVA_OPTS=-Xms3g -Xmx3g"
+  portainer:
+    container_name: portainer
+    image: portainer/portainer-ce:latest
+    restart: unless-stopped
+    ports:
+      - "9443:9443"
+      - "8001:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - cyber-blue
 
-# ──────────────────────────────────────────────────────────────────
-# FIX 2: Wazuh services have NO healthchecks — they start in wrong order
-# ──────────────────────────────────────────────────────────────────
-# ADD to wazuh.indexer service:
-#   healthcheck:
-#     test: curl -sk https://localhost:9200/_cluster/health || exit 1
-#     interval: 10s
-#     timeout: 5s
-#     retries: 12
-#     start_period: 60s
-#
-# ADD to wazuh.manager service:
-#   healthcheck:
-#     test: curl -sk https://localhost:55000/ || exit 1
-#     interval: 10s
-#     timeout: 5s
-#     retries: 6
-#     start_period: 60s
-#
-# UPDATE wazuh.dashboard depends_on:
-#   depends_on:
-#     wazuh.indexer:
-#       condition: service_healthy
-#     wazuh.manager:
-#       condition: service_started
-#     generator:
-#       condition: service_completed_successfully
+  mitre-navigator:
+    build:
+      context: ./attack-navigator
+      dockerfile: Dockerfile
+      # FIX BUG 19: No cache_from — rebuilt entire image on every docker compose up (very slow)
+      cache_from:
+        - cyberblue-navigator:cache
+    container_name: mitre-navigator
+    ports:
+      - "7013:4200"
+    restart: unless-stopped
+    networks:
+      - cyber-blue
 
-# ──────────────────────────────────────────────────────────────────
-# FIX 3: opensearch-init blocks Shuffle startup (chown takes time)
-# ──────────────────────────────────────────────────────────────────
-# FIND THIS:
-#   opensearch-init:
-#     image: alpine
-#     command: chown -R 1000:1000 /usr/share/opensearch/data
-#     restart: "no"
-#
-# ADD:
-#     user: "0"   ← run as root so chown works instantly
+  wireshark:
+    image: lscr.io/linuxserver/wireshark:latest
+    container_name: wireshark
+    cap_add:
+      - NET_ADMIN
+    network_mode: host # FIX BUG 12: network_mode: host is incompatible with ports: directive
+    environment:
+      - CUSTOM_USER=admin
+      - PASSWORD=cyberblue
+      - CUSTOM_PORT=7098
+      - CUSTOM_HTTPS_PORT=7099
+    volumes:
+      - ./wireshark/config:/config
+    # FIX BUG 12: REMOVED ports: "7099:3001" — not allowed with network_mode: host
+    # Wireshark is accessible directly at http://HOST_IP:7099 via host networking
+    restart: unless-stopped
+    privileged: true
 
-# ──────────────────────────────────────────────────────────────────
-# FIX 4: elasticsearch has no healthcheck — Cortex starts before ES is ready
-# ──────────────────────────────────────────────────────────────────
-# ADD to elasticsearch service:
-#   healthcheck:
-#     test: curl -s http://localhost:9200/_cluster/health || exit 1
-#     interval: 10s
-#     timeout: 5s
-#     retries: 6
-#     start_period: 30s
-#
-# UPDATE cortex depends_on:
-#   depends_on:
-#     elasticsearch:
-#       condition: service_healthy
+  suricata:
+    image: stamus/suricata:latest
+    container_name: suricata
+    network_mode: "host"
+    volumes:
+      - ./suricata:/etc/suricata
+      - ./suricata/logs:/var/log/suricata
+      - ./suricata/suricata.yaml:/etc/suricata/suricata.yaml
+      - ./suricata/rules:/etc/suricata/rules
+      - ./suricata/classification.config:/etc/suricata/classification.config
+      - ./suricata/reference.config:/etc/suricata/reference.config
+      - /etc/localtime:/etc/localtime:ro
+    command: suricata -c /etc/suricata/suricata.yaml -i ${SURICATA_INT}
+    restart: always
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    privileged: true
 
-# ──────────────────────────────────────────────────────────────────
-# FIX 5: shuffle-opensearch has 1024m heap — too low for Shuffle
-# ──────────────────────────────────────────────────────────────────
-# FIND THIS in shuffle-opensearch:
-#   - "OPENSEARCH_JAVA_OPTS=-Xms1024m -Xmx1024m"
-#
-# REPLACE WITH:
-#   - "OPENSEARCH_JAVA_OPTS=-Xms1536m -Xmx1536m"
+  evebox:
+    image: jasonish/evebox
+    container_name: evebox
+    command:
+      - evebox
+      - server
+      - --no-auth
+      - --datastore
+      - sqlite
+      - --input
+      - /var/log/suricata/eve.json
+    ports:
+      - "7015:5636"
+    volumes:
+      - ./suricata/logs:/var/log/suricata:ro
+    restart: always
+    networks:
+      - cyber-blue
 
-# ──────────────────────────────────────────────────────────────────
-# FIX 6: mitre-navigator builds from source EVERY time (very slow)
-#         Add a build cache label so Docker reuses the layer
-# ──────────────────────────────────────────────────────────────────
-# UPDATE mitre-navigator:
-#   build:
-#     context: ./attack-navigator
-#     dockerfile: Dockerfile
-#     cache_from:
-#       - cyberblue-navigator:cache   ← add this line
+  velociraptor:
+    build: ./velociraptor
+    container_name: velociraptor
+    ports:
+      - "7000:8889"
+      - "8000:8000"
+    volumes:
+      - ./velociraptor:/velociraptor
+    restart: unless-stopped
+    environment:
+      - VEL_USER=${VEL_USER}
+      - VEL_PASSWORD=${VEL_PASSWORD}
+    networks:
+      - cyber-blue
 
-# ──────────────────────────────────────────────────────────────────
-# FIX 7: fleet-server missing retry logic — crashes if MySQL not ready
-# ──────────────────────────────────────────────────────────────────
-# ADD to fleet-server:
-#   restart: on-failure
-#   command: sh -c "sleep 5 && fleet serve"
+  mail:
+    image: ixdotai/smtp
+    container_name: misp-mail
+    restart: unless-stopped
+    environment:
+      - "SMARTHOST_ADDRESS=${SMARTHOST_ADDRESS}"
+      - "SMARTHOST_PORT=${SMARTHOST_PORT}"
+      - "SMARTHOST_USER=${SMARTHOST_USER}"
+      - "SMARTHOST_PASSWORD=${SMARTHOST_PASSWORD}"
+      - "SMARTHOST_ALIASES=${SMARTHOST_ALIASES}"
+    networks:
+      - cyber-blue
 
-# ──────────────────────────────────────────────────────────────────
-# COMPLETE FIXED SECTIONS — copy-paste these into docker-compose.yml
-# ──────────────────────────────────────────────────────────────────
+  redis:
+    image: valkey/valkey:7.2
+    container_name: misp-redis
+    restart: unless-stopped
+    # FIX BUG 1+2: command used single-quoted password (shell strips quotes, valkey rejects)
+    # FIX BUG 1+2: healthcheck also used single quotes which broke arg parsing
+    command:
+      ["valkey-server", "--requirepass", "${REDIS_PASSWORD:-redispassword}"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "valkey-cli -a $${REDIS_PASSWORD:-redispassword} ping | grep -q PONG || exit 1",
+        ]
+      interval: 2s
+      timeout: 1s
+      retries: 3
+      start_period: 5s
+    networks:
+      - cyber-blue
 
-# === WAZUH INDEXER (fix heap + add healthcheck) ===
-WAZUH_INDEXER_FIXED: |
+  db:
+    image: mariadb:10.11
+    container_name: misp-db
+    restart: always
+    environment:
+      - "MYSQL_USER=${MYSQL_USER:-misp}"
+      - "MYSQL_PASSWORD=${MYSQL_PASSWORD:-example}"
+      - "MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-password}"
+      - "MYSQL_DATABASE=${MYSQL_DATABASE:-misp}"
+    command: "--innodb-buffer-pool-size=${INNODB_BUFFER_POOL_SIZE:-2048M} --innodb-change-buffering=${INNODB_CHANGE_BUFFERING:-none} --innodb-io-capacity=${INNODB_IO_CAPACITY:-1000} --innodb-io-capacity-max=${INNODB_IO_CAPACITY_MAX:-2000} --innodb-log-file-size=${INNODB_LOG_FILE_SIZE:-600M} --innodb-read-io-threads=${INNODB_READ_IO_THREADS:-16} --innodb-stats-persistent=${INNODB_STATS_PERSISTENT:-ON} --innodb-write-io-threads=${INNODB_WRITE_IO_THREADS:-4}"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    cap_add:
+      - SYS_NICE
+    healthcheck:
+      test: mysqladmin --user=$$MYSQL_USER --password=$$MYSQL_PASSWORD status
+      interval: 2s
+      timeout: 1s
+      retries: 3
+      start_period: 30s
+    networks:
+      - cyber-blue
+
+  os01:
+    image: opensearchproject/opensearch:$OS_VERSION
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
+    container_name: $OS_NODE1
+    environment:
+      - node.name=$OS_NODE1
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms$OS_JAVA_MEM -Xmx$OS_JAVA_MEM"
+      - DISABLE_SECURITY_PLUGIN=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - discovery.type=single-node
+    # FIX BUG 16: os01_data volume was declared but never mounted — Arkime data was lost on restart
+    volumes:
+      - os01_data:/usr/share/opensearch/data
+    restart: unless-stopped
+    networks:
+      - cyber-blue
+
+  arkime:
+    build:
+      context: ./arkime
+      dockerfile: Dockerfile
+    container_name: arkime
+    depends_on:
+      - $OS_NODE1
+    environment:
+      - OS_HOST=$OS_NODE1
+      - OS_PORT=9200
+    ports:
+      # FIX BUG 13: was binding port 8005 TWICE ($ARKIME_PORT + 7008) — Docker crashes on duplicate
+      - "7008:8005"
+    volumes:
+      - arkime_config:/data/config
+      - arkime_logs:/data/logs
+      - type: bind
+        source: $PCAP_DIR
+        target: /data/pcap
+    restart: unless-stopped
+    networks:
+      - cyber-blue
+
+  fleet-redis:
+    image: redis:6.2
+    container_name: fleet-redis
+    restart: always
+    ports:
+      - "6390:6379"
+    networks:
+      - cyber-blue
+
+  fleet-mysql:
+    image: mysql:8.0
+    container_name: fleet-mysql
+    restart: always
+    command: --innodb-buffer-pool-size=1024M --innodb-flush-log-at-trx-commit=2 --skip-log-bin --innodb-log-file-size=256M --innodb-log-buffer-size=64M
+    environment:
+      MYSQL_ROOT_PASSWORD: fleetroot
+      MYSQL_DATABASE: fleet
+      MYSQL_USER: fleet
+      MYSQL_PASSWORD: fleetpass
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-pfleetroot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - fleet-mysql-data:/var/lib/mysql
+    networks:
+      - cyber-blue
+
+  fleet-server:
+    image: fleetdm/fleet:latest
+    container_name: fleet-server
+    depends_on:
+      fleet-mysql:
+        condition: service_healthy
+      fleet-redis:
+        condition: service_started
+    ports:
+      - "7007:8080"
+    environment:
+      FLEET_MYSQL_USERNAME: fleet
+      FLEET_MYSQL_PASSWORD: fleetpass
+      FLEET_MYSQL_DATABASE: fleet
+      FLEET_MYSQL_ADDRESS: fleet-mysql:3306
+      FLEET_REDIS_ADDRESS: fleet-redis:6379
+      FLEET_SERVER_ADDRESS: 0.0.0.0:8080
+      FLEET_APP_URL: http://${HOST_IP}:7007 # FIX BUG 18: was localhost:9010
+      FLEET_SERVER_TLS: "false"
+    volumes:
+      - fleet-server-data:/var/lib/fleet
+    restart: on-failure # FIX BUG 11: exits if DB not prepared, on-failure retries
+    command: sh -c "sleep 5 && fleet serve"
+    networks:
+      - cyber-blue
+
+  thehive:
+    image: strangebee/thehive:5.3.9-1
+    container_name: thehive
+    restart: unless-stopped
+    ports:
+      - "7005:9000"
+    networks:
+      - cyber-blue
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.10.2
+    container_name: elasticsearch
+    environment:
+      - http.host=0.0.0.0
+      - discovery.type=single-node
+      - script.allowed_types=inline
+      - thread_pool.search.queue_size=100000
+      - thread_pool.write.queue_size=10000
+    # FIX BUG 7: No healthcheck — cortex started before ES was ready
+    healthcheck:
+      test: "curl -s http://localhost:9200/_cluster/health || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+    ports:
+      - "9210:9200"
+      - "9300:9300"
+    networks:
+      - cyber-blue
+
+  cortex:
+    image: thehiveproject/cortex:latest
+    container_name: cortex
+    environment:
+      - job_directory=${job_directory}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      elasticsearch:
+        condition: service_healthy # FIX BUG 8: was simple dep, cortex started before ES ready
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:7006:9001"
+    networks:
+      - cyber-blue
+
+  generator:
+    image: wazuh/wazuh-certs-generator:0.0.2
+    container_name: wazuh-cert-generator # FIX BUG 3: was 'genrator' (typo)
+    hostname: wazuh-certs-generator
+    command: generate-indexer-certs
+    restart: "no"
+    volumes:
+      - ./wazuh/config/certs.yml:/config/certs.yml
+      - ./wazuh/config/wazuh_indexer_ssl_certs/:/certificates/
+    networks:
+      - cyber-blue
+
+  wazuh.manager:
+    image: wazuh/wazuh-manager:4.12.0
+    container_name: wazuh-manager
+    hostname: wazuh.manager
+    restart: always
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 655360
+        hard: 655360
+    ports:
+      - "1514:1514"
+      - "1515:1515"
+      - "514:514/udp"
+      - "55000:55000"
+    environment:
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=SecretPassword
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      - SSL_KEY=/etc/ssl/filebeat.key
+      - API_USERNAME=wazuh-wui
+      - API_PASSWORD=MyS3cr37P450r.*-
+    volumes:
+      - wazuh_api_configuration:/var/ossec/api/configuration
+      - wazuh_etc:/var/ossec/etc
+      - wazuh_logs:/var/ossec/logs
+      - wazuh_queue:/var/ossec/queue
+      - wazuh_var_multigroups:/var/ossec/var/multigroups
+      - wazuh_integrations:/var/ossec/integrations
+      - wazuh_active_response:/var/ossec/active-response/bin
+      - wazuh_agentless:/var/ossec/agentless
+      - wazuh_wodles:/var/ossec/wodles
+      - filebeat_etc:/etc/filebeat
+      - filebeat_var:/var/lib/filebeat
+      - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca-manager.pem:/etc/ssl/root-ca.pem
+      - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.manager.pem:/etc/ssl/filebeat.pem
+      - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.manager-key.pem:/etc/ssl/filebeat.key
+      - ./wazuh/config/wazuh_cluster/wazuh_manager.conf:/wazuh-config-mount/etc/ossec.conf
+    depends_on:
+      - generator
+    networks:
+      - cyber-blue # FIX BUG 17: wazuh.manager had no network — isolated from other services
+
   wazuh.indexer:
     image: wazuh/wazuh-indexer:4.12.0
     container_name: wazuh-indexer
@@ -110,7 +409,14 @@ WAZUH_INDEXER_FIXED: |
     ports:
       - "9200:9200"
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms3g -Xmx3g"    # FIX: was 1g — too low!
+      - "OPENSEARCH_JAVA_OPTS=-Xms3g -Xmx3g" # FIX BUG 4: was 1g — OOM on 16GB with 28 containers
+    # FIX BUG 5: Added healthcheck — wazuh.dashboard was starting before indexer ready
+    healthcheck:
+      test: "curl -sk -u admin:SecretPassword https://localhost:9200/_cluster/health || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
     ulimits:
       memlock:
         soft: -1
@@ -118,12 +424,6 @@ WAZUH_INDEXER_FIXED: |
       nofile:
         soft: 65536
         hard: 65536
-    healthcheck:                                   # FIX: was missing entirely
-      test: "curl -sk https://localhost:9200/_cluster/health || exit 1"
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 60s
     volumes:
       - wazuh-indexer-data:/var/lib/wazuh-indexer
       - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/certs/root-ca.pem
@@ -135,11 +435,7 @@ WAZUH_INDEXER_FIXED: |
       - ./wazuh/config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/opensearch-security/internal_users.yml
     depends_on:
       - generator
-    networks:
-      - cyber-blue
 
-# === WAZUH DASHBOARD (fix depends_on to wait for indexer health) ===
-WAZUH_DASHBOARD_FIXED: |
   wazuh.dashboard:
     image: wazuh/wazuh-dashboard:4.12.0
     container_name: wazuh-dashboard
@@ -165,7 +461,7 @@ WAZUH_DASHBOARD_FIXED: |
       - wazuh-dashboard-custom:/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom
     depends_on:
       wazuh.indexer:
-        condition: service_healthy    # FIX: waits for indexer to be actually ready
+        condition: service_healthy # FIX BUG 6: was simple list, started before indexer ready
       wazuh.manager:
         condition: service_started
       generator:
@@ -174,58 +470,83 @@ WAZUH_DASHBOARD_FIXED: |
       - wazuh.indexer:wazuh.indexer
       - wazuh.manager:wazuh.manager
     networks:
-      - cyber-blue
+      - cyber-blue # FIX BUG 17: wazuh.dashboard had no network — isolated from portal/other services
 
-# === ELASTICSEARCH (add healthcheck so Cortex waits for it) ===
-ELASTICSEARCH_FIXED: |
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:7.10.2
-    container_name: elasticsearch
-    environment:
-      - http.host=0.0.0.0
-      - discovery.type=single-node
-      - script.allowed_types=inline
-      - thread_pool.search.queue_size=100000
-      - thread_pool.write.queue_size=10000
-    healthcheck:                                   # FIX: was missing
-      test: "curl -s http://localhost:9200/_cluster/health || exit 1"
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 30s
-    restart: unless-stopped
+  opensearch-init:
+    image: alpine
+    container_name: opensearch-init
+    user: "0" # FIX BUG 9: must run as root for chown to succeed
+    volumes:
+      - ./shuffle/shuffle-database:/usr/share/opensearch/data
+    command: chown -R 1000:1000 /usr/share/opensearch/data
+    restart: "no"
+
+  shuffle-frontend:
+    image: ghcr.io/shuffle/shuffle-frontend:latest
+    container_name: shuffle-frontend
+    hostname: shuffle-frontend
     ports:
-      - "9210:9200"
-      - "9300:9300"
+      - "${FRONTEND_PORT}:80"
+      - "${FRONTEND_PORT_HTTPS}:443"
     networks:
       - cyber-blue
-
-# === CORTEX (wait for elasticsearch to be healthy) ===
-CORTEX_FIXED: |
-  cortex:
-    image: thehiveproject/cortex:latest
-    container_name: cortex
     environment:
-      - job_directory=${job_directory}
+      - BACKEND_HOSTNAME=${BACKEND_HOSTNAME}
+    restart: unless-stopped
+    depends_on:
+      - shuffle-backend
+
+  shuffle-backend:
+    image: ghcr.io/shuffle/shuffle-backend:latest
+    container_name: shuffle-backend
+    hostname: ${BACKEND_HOSTNAME}
+    ports:
+      - "${BACKEND_PORT}:5001"
+    networks:
+      - cyber-blue
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      elasticsearch:
-        condition: service_healthy    # FIX: was just "- elasticsearch" (no health check)
+      - ./shuffle/shuffle-apps:/shuffle-apps:z
+      - ./shuffle/shuffle-files:/shuffle-files:z
+    env_file: .env
+    environment:
+      - SHUFFLE_APP_HOTLOAD_FOLDER=/shuffle-apps
+      - SHUFFLE_FILE_LOCATION=/shuffle-files
+    group_add:
+      - "docker" # FIX BUG 15: shuffle-backend needs docker group for docker.sock
     restart: unless-stopped
-    ports:
-      - "0.0.0.0:7006:9001"
+
+  shuffle-orborus:
+    image: ghcr.io/shuffle/shuffle-orborus:latest
+    container_name: shuffle-orborus
+    hostname: shuffle-orborus
     networks:
       - cyber-blue
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - SHUFFLE_APP_SDK_TIMEOUT=300
+      - SHUFFLE_ORBORUS_EXECUTION_CONCURRENCY=7
+      - ENVIRONMENT_NAME=Shuffle
+      - ORG_ID=Shuffle
+      - BASE_URL=http://${OUTER_HOSTNAME}:5001
+      - DOCKER_API_VERSION=1.40
+      - SHUFFLE_WORKER_IMAGE=ghcr.io/shuffle/shuffle-worker:latest
+      - SHUFFLE_STATS_DISABLED=true
+      - SHUFFLE_LOGS_DISABLED=true
+    env_file: .env
+    restart: unless-stopped
+    group_add:
+      - "docker" # FIX BUG 15: shuffle-orborus needs docker group for docker.sock
+    security_opt:
+      - seccomp:unconfined
 
-# === SHUFFLE OPENSEARCH (increase heap from 1g to 1.5g) ===
-SHUFFLE_OS_FIXED: |
   shuffle-opensearch:
     image: opensearchproject/opensearch:3.0.0
     container_name: shuffle-opensearch
     hostname: shuffle-opensearch
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms1536m -Xmx1536m"  # FIX: was 1024m
+      - "OPENSEARCH_JAVA_OPTS=-Xms1536m -Xmx1536m" # FIX BUG 10: was 1024m — OOM under load
       - bootstrap.memory_lock=true
       - DISABLE_PERFORMANCE_ANALYZER_AGENT_CLI=true
       - cluster.initial_master_nodes=shuffle-opensearch
@@ -252,13 +573,53 @@ SHUFFLE_OS_FIXED: |
     depends_on:
       - opensearch-init
 
-# === OPENSEARCH-INIT (run as root so chown works instantly) ===
-OPENSEARCH_INIT_FIXED: |
-  opensearch-init:
-    image: alpine
-    container_name: opensearch-init
-    user: "0"                                      # FIX: run as root for chown
+  caldera:
+    build:
+      context: ./caldera
+      dockerfile: Dockerfile
+      args:
+        - VARIANT=full
+    container_name: caldera
+    hostname: caldera
+    ports:
+      - "7009:8888"
     volumes:
-      - ./shuffle/shuffle-database:/usr/share/opensearch/data
-    command: chown -R 1000:1000 /usr/share/opensearch/data
-    restart: "no"
+      - ./caldera/conf/local.yml:/usr/src/app/conf/local.yml:ro
+      - ./caldera/data:/usr/src/app/data
+      - ./caldera/logs:/usr/src/app/logs
+    networks:
+      - cyber-blue
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    working_dir: /usr/src/app
+
+volumes:
+  wazuh_api_configuration:
+  wazuh_etc:
+  wazuh_logs:
+  wazuh_queue:
+  wazuh_var_multigroups:
+  wazuh_integrations:
+  wazuh_active_response:
+  wazuh_agentless:
+  wazuh_wodles:
+  filebeat_etc:
+  filebeat_var:
+  wazuh-indexer-data:
+  wazuh-dashboard-config:
+  wazuh-dashboard-custom:
+  mysql_data:
+  fleet-mysql-data:
+  fleet-server-data:
+  arkime_config:
+  arkime_logs:
+  os01_data:
+  yeti-exports:
+  yeti-db:
+  portainer_data:
+
+networks:
+  cyber-blue:
+    name: cyber-blue
+    driver: bridge

@@ -139,25 +139,10 @@ content = re.sub(
 
 # Fix start_period to give redis more time
 content = content.replace(
-    "container_name: misp-redis\n    restart: unless-stopped\n    command:",
-    "container_name: misp-redis\n    restart: unless-stopped\n    command:"
+    "container_name: misp-redis\n    restart: unless-stopped\n    command: \"--requirepass",
+    "container_name: misp-redis\n    restart: unless-stopped\n    command: [\"valkey-server\", \"--requirepass\", \"${REDIS_PASSWORD:-redispassword}\"]"
 )
-
-# Make sure redis has the network defined
-if "container_name: misp-redis" in content:
-    # Find the redis block and check if it has the network
-    redis_block_start = content.find("container_name: misp-redis")
-    redis_block_end = content.find("\n  ", redis_block_start + 100)
-    redis_section = content[redis_block_start:redis_block_end]
-    
-    if "cyber-blue" not in redis_section and "networks:" not in redis_section:
-        content = content.replace(
-            "container_name: misp-redis\n",
-            "container_name: misp-redis\n"
-        )
-        print("  ✅ misp-redis healthcheck fixed")
-    else:
-        print("  ℹ️  misp-redis network already configured")
+        print("  ✅ misp-redis command syntax fixed")
 
 with open("docker-compose.yml", "w") as f:
     f.write(content)
@@ -209,7 +194,7 @@ docker compose up -d --remove-orphans 2>&1 | tail -15
 log "Waiting for containers to start..."
 WAIT=0; MAX=120; MIN=20
 while true; do
-  RUNNING=$(docker ps --filter "status=running" --format "{{.Names}}" | wc -l)
+  RUNNING=$(docker ps --filter "status=running" --format "{{.Names}}" | wc -l | tr -d ' \n')
   echo -ne "\r  Running: ${RUNNING} containers (${WAIT}s elapsed)"
   [ "$RUNNING" -ge "$MIN" ] && { echo ""; break; }
   [ $WAIT -ge $MAX ]        && { echo ""; warn "Timeout — ${RUNNING} running"; break; }
@@ -230,7 +215,7 @@ echo -e "${BLUE}Crashed/Exited containers:${NC}"
 CRASHED=$(docker ps -a --filter "status=exited" --format "{{.Names}}: {{.Status}}" | grep -v "wazuh-cert" || echo "none")
 echo "$CRASHED"
 
-TOTAL=$(docker ps --filter "status=running" --format "{{.Names}}" | wc -l)
+TOTAL=$(docker ps --filter "status=running" --format "{{.Names}}" | wc -l | tr -d ' \n')
 HOST_IP=$(hostname -I | awk '{print $1}')
 
 echo ""

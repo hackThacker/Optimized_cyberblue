@@ -55,10 +55,13 @@ fi
 # ── Step 2: Wait for OpenSearch (smart poll, not fixed sleep) ─────
 step "STEP 2 — Waiting for OpenSearch"
 
-# FIX: Original uses fixed sleep. This polls every 3s, max 60s.
+# FIX BUG 7: Original hardcoded os01 — auto-detect OpenSearch container name
+OS_CONTAINER=$(docker ps --format "{{.Names}}" | grep -E "opensearch|os01|wazuh.indexer|elastic" | head -1 || echo "os01")
+log "Detected OpenSearch/Indexer container: $OS_CONTAINER"
+
 WAIT=0; MAX=60
-until docker exec arkime curl -s http://os01:9200/_cluster/health 2>/dev/null | grep -q "green\|yellow"; do
-  echo -ne "\r  Waiting for OpenSearch... ${WAIT}s / ${MAX}s"
+until docker exec arkime curl -s "http://${OS_CONTAINER}:9200/_cluster/health" 2>/dev/null | grep -q "green\|yellow"; do
+  echo -ne "\r  Waiting for OpenSearch ($OS_CONTAINER)... ${WAIT}s / ${MAX}s"
   sleep 3; WAIT=$((WAIT+3))
   [ $WAIT -ge $MAX ] && { echo ""; warn "OpenSearch slow — continuing anyway"; break; }
 done
@@ -70,7 +73,7 @@ step "STEP 3 — Database initialization"
 if [ "$FORCE_INIT" = true ]; then
   log "Force-initializing Arkime database..."
   docker exec arkime bash -c \
-    '/opt/arkime/db/db.pl http://os01:9200 init --force --insecure' 2>/dev/null \
+    "/opt/arkime/db/db.pl http://${OS_CONTAINER}:9200 init --force --insecure" 2>/dev/null \
     || warn "DB init warnings are normal for existing databases"
 else
   log "Skipping DB init (use --force to reinitialize)"

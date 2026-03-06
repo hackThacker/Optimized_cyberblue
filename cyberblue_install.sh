@@ -388,13 +388,10 @@ sudo iptables -t filter -F DOCKER                  2>/dev/null || true
 sudo iptables -t filter -F DOCKER-ISOLATION-STAGE-1 2>/dev/null || true
 sudo iptables -t filter -F DOCKER-ISOLATION-STAGE-2 2>/dev/null || true
 sudo iptables -P FORWARD ACCEPT
-sudo systemctl restart docker
-sleep 8
-
-# Re-apply socket permission after restart
+# FIX: Removed second unnecessary Docker restart (Step 2 already restarted it)
+# Just re-apply socket permission in case it was reset
 sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
 
-timeout 30 bash -c 'until docker info &>/dev/null; do sleep 2; done'
 log "Docker networking ready"
 
 # ============================================================
@@ -408,9 +405,9 @@ docker compose up -d wazuh.indexer 2>&1 | tail -3
 log "Waiting for OpenSearch/Wazuh indexer to be healthy..."
 WAIT=0
 MAX_WAIT=180
-until curl -sk https://localhost:9200/_cluster/health &>/dev/null || \
+until curl -sk -u admin:SecretPassword https://localhost:9200/_cluster/health &>/dev/null || \
       docker exec wazuh.indexer \
-        curl -sk https://localhost:9200/_cluster/health &>/dev/null; do
+        curl -sk -u admin:SecretPassword https://localhost:9200/_cluster/health &>/dev/null; do
   sleep 5; WAIT=$((WAIT+5))
   [ $WAIT -ge $MAX_WAIT ] && { warn "Indexer slow — continuing anyway"; break; }
   echo -ne "\r  Waiting for indexer... ${WAIT}s / ${MAX_WAIT}s"

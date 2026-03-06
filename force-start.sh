@@ -69,7 +69,7 @@ MAX_WAIT=180
 MIN_RUNNING=20
 
 while true; do
-  RUNNING=$(docker ps --filter "status=running" --format "{{.Names}}" | wc -l)
+  RUNNING=$(docker ps --filter "status=running" --format "{{.Names}}" | wc -l | tr -d ' \n')
   echo -ne "\r  Running containers: ${RUNNING} / ${MIN_RUNNING} target  (${WAIT}s elapsed)"
 
   [ "$RUNNING" -ge "$MIN_RUNNING" ] && { echo ""; log "Target reached: $RUNNING containers running"; break; }
@@ -98,8 +98,8 @@ check_url "Velociraptor" "https://${HOST_IP}:7000"
 check_url "Portainer"    "https://${HOST_IP}:9443"
 
 # ── Final summary ─────────────────────────────────────────────────
-TOTAL=$(docker ps --filter "status=running" --format "{{.Names}}" | wc -l)
-EXITED=$(docker ps -a --filter "status=exited" --format "{{.Names}}" | wc -l)
+TOTAL=$(docker ps --filter "status=running" --format "{{.Names}}" | wc -l | tr -d ' \n')
+EXITED=$(docker ps -a --filter "status=exited" --format "{{.Names}}" | wc -l | tr -d ' \n')
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════╗"
