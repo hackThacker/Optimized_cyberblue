@@ -470,10 +470,14 @@ until indexer_ready; do
   echo -ne "\r  Waiting for indexer... ${WAIT}s / ${MAX_WAIT}s"
 done
 echo ""
-log "Indexer ready (${WAIT}s)"
+if [ $WAIT -ge $MAX_WAIT ]; then
+  warn "Indexer not confirmed healthy after ${WAIT}s — continuing anyway"
+else
+  log "Indexer ready (${WAIT}s)"
+fi
 
 log "Starting all remaining containers in parallel..."
-docker compose up -d --remove-orphans 2>&1 | tail -10
+docker compose up -d --remove-orphans $(docker compose config --services | grep -v '^generator$') 2>&1 | tail -10
 
 # ============================================================
 # STEP 15 — Post-deploy background tasks
