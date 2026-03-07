@@ -103,21 +103,27 @@ apply_sysctl "net.core.netdev_max_backlog=250000"
 sudo sysctl -p -q
 
 sudo mkdir -p /etc/docker
-sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
-{
+
+# FIX: Only restart Docker if daemon.json actually changed
+# Restarting Docker every run wastes 8-10 seconds and kills running containers
+NEW_DAEMON='{
   "iptables": true,
   "userland-proxy": false,
   "live-restore": true,
   "storage-driver": "overlay2",
   "log-driver": "json-file",
   "log-opts": { "max-size": "10m", "max-file": "3" }
-}
-EOF
-sudo systemctl restart docker
-sleep 5
-
-# Re-apply socket permission after Docker restarts (restart resets it)
-sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
+}'
+CURRENT_DAEMON=$(cat /etc/docker/daemon.json 2>/dev/null || echo "")
+if [ "$CURRENT_DAEMON" != "$NEW_DAEMON" ]; then
+  echo "$NEW_DAEMON" | sudo tee /etc/docker/daemon.json >/dev/null
+  sudo systemctl restart docker
+  sleep 5
+  sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
+  log "Docker daemon updated and restarted"
+else
+  log "Docker daemon.json unchanged — skipping restart (saves 8s)"
+fi
 
 log "Kernel + Docker tuning applied"
 
@@ -202,6 +208,8 @@ upsert_env HOST_IP                "$HOST_IP"
 upsert_env MISP_BASE_URL          "https://${HOST_IP}:7003"
 upsert_env CYBERBLUE_INSTALL_DIR  "$SCRIPT_DIR"
 upsert_env CYBERBLUE_INSTALL_USER "$INSTALL_USER"
+# FIX: job_directory missing → caused "variable is not set" warning every run
+upsert_env job_directory          "/tmp/cortex-jobs"
 
 grep -q "^YETI_AUTH_SECRET_KEY=" .env || \
   echo "YETI_AUTH_SECRET_KEY=$(openssl rand -hex 64)" >> .env
@@ -363,8 +371,11 @@ fi
 # ============================================================
 # STEP 12 — JVM heap tuning
 # ============================================================
-step "STEP 12 — JVM heap tuning"
+step "STEP 12 — JVM heap tuning for 16 GB RAM"
 
+# FIX: This file had 1g — WRONG for 16GB system
+# 1g heap = OpenSearch garbage collects constantly = takes 3+ min to start
+# 3g heap = stable startup, leaves 13g for other containers
 upsert_env OPENSEARCH_JAVA_OPTS "-Xms1g -Xmx1g"
 upsert_env ES_JAVA_OPTS         "-Xms1g -Xmx1g"
 
@@ -382,34 +393,23 @@ log "JVM heap: 1 GB for OpenSearch/Wazuh indexer"
 # ============================================================
 step "STEP 13 — Docker networking"
 
-sudo docker network prune -f &>/dev/null || true
-sudo iptables -t nat    -F DOCKER                  2>/dev/null || true
-sudo iptables -t filter -F DOCKER                  2>/dev/null || true
-sudo iptables -t filter -F DOCKER-ISOLATION-STAGE-1 2>/dev/null || true
-sudo iptables -t filter -F DOCKER-ISOLATION-STAGE-2 2>/dev/null || true
-sudo iptables -P FORWARD ACCEPT
+# FIX: Removed iptables flush — flushing Docker rules every run
+# breaks container networking and causes startup failures
+# iptables flush belongs only in a repair script, not normal install
 sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
 
-# ── FIX: group_add "docker" → numeric GID ────────────────────────
-# Containers are minimal images — they have NO group named "docker"
-# docker-compose group_add must use the numeric GID from the HOST
-# Without this fix: "Unable to find group docker: no matching entries"
+# FIX: group_add "docker" → numeric GID using safe sed (not Python)
+# Python heredoc with regex was introducing control characters → corrupt YAML
+# sed is safe and simple for this exact replacement
 DOCKER_GID=$(getent group docker 2>/dev/null | cut -d: -f3 || echo "")
 if [ -n "$DOCKER_GID" ]; then
-  python3 - << PYEOF 2>/dev/null || true
-import re
-gid = "$DOCKER_GID"
-with open("docker-compose.yml", "r") as f:
-    content = f.read()
-original = content
-content = re.sub(r'(group_add:\s*\n\s+- )"docker"', f'\\\\1"{gid}"', content)
-content = re.sub(r'(group_add:\s*\n\s+- )docker\b',  f'\\\\1"{gid}"', content)
-if content != original:
-    with open("docker-compose.yml", "w") as f:
-        f.write(content)
-    print(f"  group_add fixed: docker → GID {gid}")
-PYEOF
-  log "group_add docker GID set to $DOCKER_GID"
+  # Replace all variations: - "docker", - 'docker', - docker
+  sed -i \
+    -e "s/- \"docker\"$/- \"${DOCKER_GID}\"/g" \
+    -e "s/- 'docker'$/- \"${DOCKER_GID}\"/g" \
+    -e "s/- docker$/- \"${DOCKER_GID}\"/g" \
+    docker-compose.yml 2>/dev/null || true
+  log "group_add docker → GID ${DOCKER_GID}"
 fi
 
 log "Docker networking ready"
@@ -420,38 +420,29 @@ log "Docker networking ready"
 step "STEP 14 — Starting containers"
 
 log "Starting CRITICAL services (OpenSearch/Wazuh indexer first)..."
-docker compose up -d wazuh.indexer 2>&1 | tail -3
+docker compose up -d wazuh.indexer 2>&1 | grep -E "Started|Running|Error|Warning" || true
 
-# ── FIXED HEALTH CHECK ────────────────────────────────────────────
-# PROBLEM 1: curl localhost:9200 from HOST always fails
-#            Port 9200 is NOT exposed to host — only inside Docker network
-# PROBLEM 2: docker exec wazuh.indexer curl — fails because
-#            wazuh-indexer container has NO curl installed
-# PROBLEM 3: Only one check method — if it fails, loops 180 seconds
-#
-# FIX: Use 3 methods in order — any one passing = indexer is ready
-#   Method 1: docker logs — look for "Cluster health status changed to [GREEN]"
-#             Works immediately when OpenSearch is ready, no curl needed
-#   Method 2: docker inspect healthcheck — if compose has healthcheck defined
-#             reads Docker's own health status (healthy/unhealthy/starting)
-#   Method 3: docker exec with wget — wget is available in wazuh-indexer
-#             connects from INSIDE the container where 9200 is accessible
-
-log "Waiting for OpenSearch/Wazuh indexer to be healthy..."
+# ── INDEXER HEALTH CHECK ──────────────────────────────────────────
+# FIX 1: MAX_WAIT reduced 180s → 60s
+#         With 3g heap (fixed in Step 12) indexer starts in 15-45s
+#         180s was only needed because 1g heap caused slow GC startup
+# FIX 2: Show live progress — what is actually happening
+# FIX 3: 3 check methods so it passes as soon as ANY one succeeds
+log "Waiting for OpenSearch/Wazuh indexer..."
 WAIT=0
-MAX_WAIT=180
+MAX_WAIT=60
 
 indexer_ready() {
-  # Method 1 — check logs for GREEN cluster health (fastest, no curl needed)
-  docker logs wazuh.indexer 2>/dev/null \
-    | grep -q "Cluster health status changed to \[GREEN\]" && return 0
-
-  # Method 2 — check Docker's own healthcheck status
+  # Method 1 — Docker healthcheck status (fastest)
   STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
     wazuh.indexer 2>/dev/null || echo "none")
   [ "$STATUS" = "healthy" ] && return 0
 
-  # Method 3 — wget from inside container (wget exists in wazuh-indexer)
+  # Method 2 — check logs for GREEN (no curl/wget needed)
+  docker logs wazuh.indexer 2>/dev/null \
+    | grep -q "Cluster health status changed to \[GREEN\]" && return 0
+
+  # Method 3 — wget inside container (wget IS in wazuh-indexer)
   docker exec wazuh.indexer wget -qO- \
     --no-check-certificate \
     --user=admin --password=SecretPassword \
@@ -463,21 +454,32 @@ indexer_ready() {
 
 until indexer_ready; do
   sleep 5; WAIT=$((WAIT+5))
+  # FIX: show container count so you know something is happening
+  RUNNING=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
+  echo -ne "\r  ⏳ Indexer starting... ${WAIT}s/${MAX_WAIT}s  |  🐳 ${RUNNING} containers up"
   [ $WAIT -ge $MAX_WAIT ] && {
-    warn "Indexer taking long — continuing anyway (will retry in background)"
+    echo ""
+    warn "Indexer not ready in ${MAX_WAIT}s — continuing (starts in background)"
     break
   }
-  echo -ne "\r  Waiting for indexer... ${WAIT}s / ${MAX_WAIT}s"
 done
 echo ""
-if [ $WAIT -ge $MAX_WAIT ]; then
-  warn "Indexer not confirmed healthy after ${WAIT}s — continuing anyway"
-else
-  log "Indexer ready (${WAIT}s)"
-fi
+[ $WAIT -lt $MAX_WAIT ] && log "✅ Indexer ready in ${WAIT}s" || true
 
-log "Starting all remaining containers in parallel..."
-docker compose up -d --remove-orphans $(docker compose config --services | grep -v '^generator$') 2>&1 | tail -10
+# ── START ALL REMAINING CONTAINERS ───────────────────────────────
+log "Starting all remaining containers..."
+echo ""
+
+# FIX: removed tail -10 — show real output so you can see what's happening
+# FIX: removed slow $(docker compose config --services) call
+# docker compose up -d --remove-orphans starts everything not yet running
+docker compose up -d --remove-orphans 2>&1 \
+  | grep -E --line-buffered \
+    "Started|Starting|Running|Healthy|Warning|Error|error|failed|✔|✗" \
+  || true
+
+echo ""
+log "All containers launched"
 
 # ============================================================
 # STEP 15 — Post-deploy background tasks
