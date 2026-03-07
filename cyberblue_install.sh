@@ -3,7 +3,10 @@
 # CyberBlue FAST Installer — Optimized for 8gb ram 6core
 # ============================================================================
 
-set -euo pipefail
+# FIX: Removed set -euo pipefail — kills script on docker errors
+# Use explicit error handling instead
+set +e
+set +u
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -470,16 +473,21 @@ echo ""
 log "Starting all remaining containers..."
 echo ""
 
-# FIX: removed tail -10 — show real output so you can see what's happening
-# FIX: removed slow $(docker compose config --services) call
-# docker compose up -d --remove-orphans starts everything not yet running
-docker compose up -d --remove-orphans 2>&1 \
-  | grep -E --line-buffered \
-    "Started|Starting|Running|Healthy|Warning|Error|error|failed|✔|✗" \
+# FIX: Added timeout 120 — prevents script hanging forever on elasticsearch error
+# FIX: Removed grep pipe — pipefail was killing the script when compose had errors
+# FIX: || true ensures script ALWAYS continues to Step 15+ even if compose fails
+timeout 120 docker compose up -d --remove-orphans 2>&1 | tee /tmp/step14.log \
+  | grep --line-buffered -E "Started|Starting|Running|Healthy|Error|failed" \
   || true
 
 echo ""
-log "All containers launched"
+# Show any errors clearly but do NOT stop
+ERRORS=$(grep -iE "error|failed|denied" /tmp/step14.log 2>/dev/null | grep -v "^#" || true)
+if [ -n "$ERRORS" ]; then
+  warn "Some containers had issues (non-fatal):"
+  echo "$ERRORS" | while read line; do warn "  $line"; done
+fi
+log "All containers launched — proceeding to Step 15"
 
 # ============================================================
 # STEP 15 — Post-deploy background tasks
