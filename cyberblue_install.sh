@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# CyberBlue FAST Installer — Optimized for i7-14700HX / 16GB RAM
+# CyberBlue FAST Installer — Optimized for 8gb ram 6core
 # ============================================================================
 
 set -euo pipefail
@@ -22,8 +22,8 @@ export DEBIAN_FRONTEND=noninteractive
 echo -e "${CYAN}"
 cat << 'BANNER'
   ╔══════════════════════════════════════════════════════╗
-  ║   CyberBlue FAST INSTALLER  — i7-14700HX / 16GB    ║
-  ║   Parallel startup · Heap tuned · No wasted waits  ║
+  ║   CyberBlue FAST INSTALLER  — 8gb ram 6core          ║
+  ║   Parallel startup · Heap tuned · No wasted waits    ║
   ╚══════════════════════════════════════════════════════╝
 BANNER
 echo -e "${NC}"
